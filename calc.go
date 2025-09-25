@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -8,41 +9,90 @@ import (
 	"unicode"
 )
 
-func priority(op rune) int {
-	if op == '+' || op == '-' {
-		return 1
-	}
-	if op == '*' || op == '/' {
-		return 2
-	}
-	return 0
+type numStack []int
+
+func (s *numStack) push(v int) {
+	*s = append(*s, v)
 }
 
-func apply(a, b int, op rune) int {
+func (s *numStack) pop() (int, error) {
+	if len(*s) == 0 {
+		return 0, errors.New("pop from empty num stack")
+	}
+	val := (*s)[len(*s)-1]
+	*s = (*s)[:len(*s)-1]
+	return val, nil
+}
+
+type opStack []rune
+
+func (s *opStack) push(op rune) {
+	*s = append(*s, op)
+}
+
+func (s *opStack) pop() (rune, error) {
+	if len(*s) == 0 {
+		return 0, errors.New("pop from empty op stack")
+	}
+	val := (*s)[len(*s)-1]
+	*s = (*s)[:len(*s)-1]
+	return val, nil
+}
+
+func (s *opStack) peek() (rune, bool) {
+	if len(*s) == 0 {
+		return 0, false
+	}
+	return (*s)[len(*s)-1], true
+}
+
+func priority(op rune) int {
+	switch op {
+	case '+', '-':
+		return 1
+	case '*', '/':
+		return 2
+	default:
+		return 0
+	}
+}
+
+func apply(a, b int, op rune) (int, error) {
 	switch op {
 	case '+':
-		return a + b
+		return a + b, nil
 	case '-':
-		return a - b
+		return a - b, nil
 	case '*':
-		return a * b
+		return a * b, nil
 	case '/':
-		return a / b
+		if b == 0 {
+			return 0, errors.New("division by zero")
+		}
+		return a / b, nil
 	}
-	return 0
+	return 0, fmt.Errorf("unknown operator: %q", op)
 }
 
-func eval(expr string) int {
-	nums := []int{}
-	ops := []rune{}
+func eval(expr string) (int, error) {
+	var nums numStack
+	var ops opStack
 	numStr := ""
-
-	pushNum := func() {
+	prevTokenIsOp := true
+	pushNum := func() error {
 		if numStr != "" {
-			val, _ := strconv.Atoi(numStr)
-			nums = append(nums, val)
+			if numStr == "-" {
+				return errors.New("dangling unary minus")
+			}
+			val, err := strconv.Atoi(numStr)
+			if err != nil {
+				return err
+			}
+			nums.push(val)
 			numStr = ""
+			prevTokenIsOp = false
 		}
+		return nil
 	}
 
 	for _, ch := range expr {
@@ -51,58 +101,108 @@ func eval(expr string) int {
 		}
 		if unicode.IsDigit(ch) {
 			numStr += string(ch)
+			prevTokenIsOp = false
 			continue
 		}
-		pushNum()
+
+		if ch == '-' && prevTokenIsOp {
+			numStr += string(ch)
+			continue
+		}
+
 		if ch == '(' {
-			ops = append(ops, ch)
+			if numStr == "-" {
+				nums.push(0)
+				ops.push('-')
+				numStr = ""
+			} else if err := pushNum(); err != nil {
+				return 0, err
+			}
+			ops.push(ch)
+			prevTokenIsOp = true
 		} else if ch == ')' {
-			for len(ops) > 0 && ops[len(ops)-1] != '(' {
-				b := nums[len(nums)-1]
-				a := nums[len(nums)-2]
-				nums = nums[:len(nums)-2]
-				op := ops[len(ops)-1]
-				ops = ops[:len(ops)-1]
-				nums = append(nums, apply(a, b, op))
+			if err := pushNum(); err != nil {
+				return 0, err
 			}
-			ops = ops[:len(ops)-1] // убираем '('
+			for {
+				top, ok := ops.peek()
+				if !ok {
+					return 0, errors.New("mismatched parentheses")
+				}
+				if top == '(' {
+					_, _ = ops.pop()
+					break
+				}
+				if err := calcOnce(&nums, &ops); err != nil {
+					return 0, err
+				}
+			}
+			prevTokenIsOp = false
 		} else {
-			for len(ops) > 0 && priority(ops[len(ops)-1]) >= priority(ch) {
-				b := nums[len(nums)-1]
-				a := nums[len(nums)-2]
-				nums = nums[:len(nums)-2]
-				op := ops[len(ops)-1]
-				ops = ops[:len(ops)-1]
-				nums = append(nums, apply(a, b, op))
+			if err := pushNum(); err != nil {
+				return 0, err
 			}
-			ops = append(ops, ch)
+			for {
+				top, ok := ops.peek()
+				if !ok || priority(top) < priority(ch) {
+					break
+				}
+				if err := calcOnce(&nums, &ops); err != nil {
+					return 0, err
+				}
+			}
+			ops.push(ch)
+			prevTokenIsOp = true
 		}
 	}
 
-	pushNum()
+	if err := pushNum(); err != nil {
+		return 0, err
+	}
 
 	for len(ops) > 0 {
-		b := nums[len(nums)-1]
-		a := nums[len(nums)-2]
-		nums = nums[:len(nums)-2]
-		op := ops[len(ops)-1]
-		ops = ops[:len(ops)-1]
-		nums = append(nums, apply(a, b, op))
+		if err := calcOnce(&nums, &ops); err != nil {
+			return 0, err
+		}
 	}
 
-	if len(nums) == 0 {
-		return 0
+	if len(nums) != 1 {
+		return 0, errors.New("invalid expression")
 	}
-	return nums[0]
+	return nums[0], nil
+}
+
+func calcOnce(nums *numStack, ops *opStack) error {
+	b, err := nums.pop()
+	if err != nil {
+		return err
+	}
+	a, err := nums.pop()
+	if err != nil {
+		return err
+	}
+	op, err := ops.pop()
+	if err != nil {
+		return err
+	}
+	res, err := apply(a, b, op)
+	if err != nil {
+		return err
+	}
+	nums.push(res)
+	return nil
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Error")
+		fmt.Println("Error: no expression")
 		return
 	}
-	expr := os.Args[1]
-	expr = strings.TrimSpace(expr)
-	res := eval(expr)
+	expr := strings.TrimSpace(os.Args[1])
+	res, err := eval(expr)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	fmt.Println(res)
 }
