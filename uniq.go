@@ -5,41 +5,77 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 )
 
-var cFlag bool
-var dFlag bool
-var uFlag bool
-var iFlag bool
-var fFlag int
-var sFlag int
-
-func setupFlags() {
-	flag.BoolVar(&cFlag, "c", false, "подсчитать количество повторений")
-	flag.BoolVar(&dFlag, "d", false, "вывести только повторяющиеся")
-	flag.BoolVar(&uFlag, "u", false, "вывести только уникальные")
-	flag.BoolVar(&iFlag, "i", false, "игнорировать регистр")
-	flag.IntVar(&fFlag, "f", 0, "пропустить num полей")
-	flag.IntVar(&sFlag, "s", 0, "пропустить num символов")
+type Options struct {
+	C, D, U, I bool
+	F, S       int
+	InputFile  string
+	OutputFile string
 }
 
-func prepare(line string) string {
-	if iFlag {
+func parseOptions(args []string, errOut io.Writer) (Options, error) {
+	var opt Options
+	fs := flag.NewFlagSet("uniq", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+
+	fs.BoolVar(&opt.C, "c", false, "подсчитать количество повторений")
+	fs.BoolVar(&opt.D, "d", false, "вывести только повторяющиеся")
+	fs.BoolVar(&opt.U, "u", false, "вывести только уникальные")
+	fs.BoolVar(&opt.I, "i", false, "игнорировать регистр")
+	fs.IntVar(&opt.F, "f", 0, "пропустить num полей")
+	fs.IntVar(&opt.S, "s", 0, "пропустить num символов")
+
+	if err := fs.Parse(args); err != nil {
+		return opt, err
+	}
+
+	rest := fs.Args()
+	if len(rest) > 0 {
+		opt.InputFile = rest[0]
+	}
+	if len(rest) > 1 {
+		opt.OutputFile = rest[1]
+	}
+	if len(rest) > 2 {
+		return opt, fmt.Errorf("слишком много аргументов")
+	}
+
+	cnt := 0
+	if opt.C {
+		cnt++
+	}
+	if opt.D {
+		cnt++
+	}
+	if opt.U {
+		cnt++
+	}
+	if cnt > 1 {
+		return opt, fmt.Errorf("нельзя одновременно использовать -c, -d и -u")
+	}
+
+	return opt, nil
+}
+
+func prepare(line string, opt Options) string {
+	if opt.I {
 		line = strings.ToLower(line)
 	}
-	if fFlag > 0 {
+	if opt.F > 0 {
 		parts := strings.Fields(line)
-		if len(parts) > fFlag {
-			line = strings.Join(parts[fFlag:], " ")
+		if len(parts) > opt.F {
+			line = strings.Join(parts[opt.F:], " ")
 		} else {
 			line = ""
 		}
 	}
-	if sFlag > 0 {
-		if len(line) > sFlag {
-			line = line[sFlag:]
+	if opt.S > 0 {
+		if len(line) > opt.S {
+			line = line[opt.S:]
 		} else {
 			line = ""
 		}
@@ -48,26 +84,9 @@ func prepare(line string) string {
 }
 
 func runUniq(in io.Reader, out io.Writer, errOut io.Writer, args []string) error {
-	flag.CommandLine = flag.NewFlagSet("uniq", flag.ContinueOnError)
-	flag.CommandLine.SetOutput(errOut)
-	setupFlags()
-	if err := flag.CommandLine.Parse(args); err != nil {
+	opt, err := parseOptions(args, errOut)
+	if err != nil {
 		return err
-	}
-
-	cnt := 0
-	if cFlag {
-		cnt++
-	}
-	if dFlag {
-		cnt++
-	}
-	if uFlag {
-		cnt++
-	}
-	if cnt > 1 {
-		fmt.Fprintln(errOut, "Ошибка: нельзя одновременно использовать -c, -d и -u")
-		return fmt.Errorf("конфликт флагов")
 	}
 
 	scanner := bufio.NewScanner(in)
@@ -75,19 +94,20 @@ func runUniq(in io.Reader, out io.Writer, errOut io.Writer, args []string) error
 	defer writer.Flush()
 
 	var prevLine, prevKey string
-	count := 0
+	var count int
+	hasPrev := false
 
 	flush := func() {
-		if prevLine == "" {
+		if !hasPrev {
 			return
 		}
-		if cFlag {
+		if opt.C {
 			fmt.Fprintf(writer, "%d %s\n", count, prevLine)
-		} else if dFlag {
+		} else if opt.D {
 			if count > 1 {
 				fmt.Fprintln(writer, prevLine)
 			}
-		} else if uFlag {
+		} else if opt.U {
 			if count == 1 {
 				fmt.Fprintln(writer, prevLine)
 			}
@@ -98,29 +118,57 @@ func runUniq(in io.Reader, out io.Writer, errOut io.Writer, args []string) error
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		key := prepare(line)
+		key := prepare(line, opt)
 
-		if key == prevKey {
+		if hasPrev && key == prevKey {
 			count++
 		} else {
 			flush()
 			prevLine = line
 			prevKey = key
 			count = 1
+			hasPrev = true
 		}
 	}
-	flush()
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(errOut, "Ошибка чтения:", err)
-		return err
+		return fmt.Errorf("Ошибка чтения: %v", err)
 	}
 
+	flush()
 	return nil
 }
 
 func main() {
-	if err := runUniq(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
+	opt, err := parseOptions(os.Args[1:], os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Ошибка:", err)
 		os.Exit(1)
+	}
+
+	var in io.Reader = os.Stdin
+	if opt.InputFile != "" {
+		f, err := os.Open(opt.InputFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Ошибка открытия входного файла:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		in = f
+	}
+
+	var out io.Writer = os.Stdout
+	if opt.OutputFile != "" {
+		f, err := os.Create(opt.OutputFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Ошибка открытия выходного файла:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		out = f
+	}
+
+	if err := runUniq(in, out, os.Stderr, os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
 }
