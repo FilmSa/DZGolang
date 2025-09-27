@@ -142,16 +142,14 @@ func runUniq(in io.Reader, out io.Writer, errOut io.Writer, args []string) error
 func main() {
 	opt, err := parseOptions(os.Args[1:], os.Stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка:", err)
-		os.Exit(1)
+		log.Fatal("Ошибка:", err)
 	}
 
 	var in io.Reader = os.Stdin
 	if opt.InputFile != "" {
 		f, err := os.Open(opt.InputFile)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Ошибка открытия входного файла:", err)
-			os.Exit(1)
+			log.Fatal("Ошибка открытия входного файла:", err)
 		}
 		defer f.Close()
 		in = f
@@ -161,8 +159,7 @@ func main() {
 	if opt.OutputFile != "" {
 		f, err := os.Create(opt.OutputFile)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Ошибка открытия выходного файла:", err)
-			os.Exit(1)
+			log.Fatal("Ошибка открытия выходного файла:", err)
 		}
 		defer f.Close()
 		out = f
